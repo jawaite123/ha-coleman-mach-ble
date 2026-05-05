@@ -7,6 +7,8 @@ A Home Assistant custom integration for Coleman Mach Bluetooth AC units. Provide
 
 > **Not affiliated with or endorsed by Airxcel, Inc. or the Coleman Mach brand.**
 
+[Screencast_20260505_013413_2.webm](https://github.com/user-attachments/assets/5cf54e9b-e62a-4fdb-abf0-b323dec16a7c)
+
 ---
 
 ## Features
