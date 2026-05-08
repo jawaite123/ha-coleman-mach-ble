@@ -54,7 +54,9 @@ Copy the `custom_components/coleman_mach_ble/` folder into your HA config's `cus
 
 ### AC shows as unavailable / cannot connect
 
-The AC requires BLE "Just Works" pairing before it will accept GATT connections. This needs to be done once, or again after the AC is factory reset or power-cycled.
+The AC requires BLE pairing before it will accept GATT connections. This needs to be done once, or again after the AC is factory reset or power-cycled.
+
+If you see `le-connection-abort-by-local` in the Home Assistant logs, that's the telltale sign — the AC is rejecting the connection because it hasn't been paired (or the bond is stale).
 
 **Re-pairing steps:**
 
@@ -68,13 +70,11 @@ The AC requires BLE "Just Works" pairing before it will accept GATT connections.
    ```
 2. Put the AC into pairing mode (refer to your AC manual).
 
-   `NoInputNoOutput` forces "Just Works" pairing with no PIN required at the BLE level.
-
-3.  Hit enter for the pairing command above.  It will ask for a pairing number which will be the number flashing on the LCD screen on the AC unit.
+3. Hit enter for the pairing command above. It will ask for a pairing number — enter the number flashing on the LCD screen on the AC unit.
 
 4. Re-enable the integration if you disabled it during troubleshooting.
 
-> **Note:** The 6-digit code shown in the Coleman Mach Smart Comfort app is an *application-level* PIN, not a BLE pairing passkey. Do not enter it in `bluetoothctl`.
+> **Note:** The 6-digit code shown in the Coleman Mach Smart Comfort app is an *application-level* PIN, not the same as the BLE pairing code shown on the LCD. Use the LCD code in `bluetoothctl`.
 
 ### Stale pairing bond
 
@@ -85,6 +85,12 @@ bluetoothctl remove <YOUR_MAC_ADDRESS>
 ```
 
 Then follow the re-pairing steps above.
+
+### Pairing fails with AuthenticationCanceled
+
+- **The AC exited pairing mode before the `pair` command ran** — the window is short. Try again: put the AC back in pairing mode and immediately run `pair`.
+- **Another device is connected to the AC** — the Coleman Mach app on a phone will hold an exclusive connection. Force-close the app or turn off Bluetooth on the phone, then retry.
+- **Power cycle the AC** — if repeated attempts fail, cut power at the breaker for 10 seconds. This clears the AC's pairing state and lets you start fresh.
 
 ## License
 
