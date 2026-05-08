@@ -25,7 +25,7 @@ from .const import (
     FAN_MODES,
     HEAT_MODES,
 )
-from .coordinator import ColemanMachCoordinator, write_set_point, write_mode
+from .coordinator import ColemanMachCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class ColemanMachClimate(CoordinatorEntity[ColemanMachCoordinator], ClimateEntit
         if temp is None:
             return
         raw_value = int(round(temp))
-        await write_set_point(self.hass, self.coordinator.mac_address, raw_value)
+        await self.coordinator.write_set_point(raw_value)
         await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -171,12 +171,12 @@ class ColemanMachClimate(CoordinatorEntity[ColemanMachCoordinator], ClimateEntit
             new_mode = "FAN HIGH"
         else:
             return
-        await write_mode(self.hass, self.coordinator.mac_address, new_mode)
+        await self.coordinator.write_mode(new_mode)
         await self.coordinator.async_request_refresh()
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         if preset_mode not in ALL_MODES:
             _LOGGER.warning("Unknown preset mode: %s", preset_mode)
             return
-        await write_mode(self.hass, self.coordinator.mac_address, preset_mode)
+        await self.coordinator.write_mode(preset_mode)
         await self.coordinator.async_request_refresh()

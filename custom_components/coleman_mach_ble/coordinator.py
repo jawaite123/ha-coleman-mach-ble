@@ -120,43 +120,12 @@ async def _read_device(hass: HomeAssistant, mac_address: str) -> ColemanMachData
     return _parse_data(raw_data)
 
 
-async def write_set_point(hass: HomeAssistant, mac_address: str, value: int) -> None:
-    device = _get_ble_device(hass, mac_address)
-    try:
-        client = await establish_connection(BleakClient, device, mac_address)
-    except BleakNotFoundError as err:
-        raise UpdateFailed(f"Device {mac_address} not found: {err}") from err
-    except Exception as err:
-        raise UpdateFailed(f"BLE connection failed: {err}") from err
-
-    try:
-        await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
-        _LOGGER.debug("Wrote set_point=%d to %s", value, mac_address)
-    finally:
-        await client.disconnect()
-
-
-async def write_mode(hass: HomeAssistant, mac_address: str, mode: str) -> None:
-    device = _get_ble_device(hass, mac_address)
-    try:
-        client = await establish_connection(BleakClient, device, mac_address)
-    except BleakNotFoundError as err:
-        raise UpdateFailed(f"Device {mac_address} not found: {err}") from err
-    except Exception as err:
-        raise UpdateFailed(f"BLE connection failed: {err}") from err
-
-    try:
-        await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
-        _LOGGER.debug("Wrote mode=%r to %s", mode, mac_address)
-    finally:
-        await client.disconnect()
-
-
 class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     """Coordinator that polls the Coleman Mach BLE thermostat."""
 
     def __init__(self, hass: HomeAssistant, mac_address: str, interval: int) -> None:
         self.mac_address = mac_address
+        self._ble_lock = asyncio.Lock()
         super().__init__(
             hass,
             _LOGGER,
@@ -165,4 +134,35 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
         )
 
     async def _async_update_data(self) -> ColemanMachData:
-        return await _read_device(self.hass, self.mac_address)
+        async with self._ble_lock:
+            return await _read_device(self.hass, self.mac_address)
+
+    async def write_set_point(self, value: int) -> None:
+        async with self._ble_lock:
+            device = _get_ble_device(self.hass, self.mac_address)
+            try:
+                client = await establish_connection(BleakClient, device, self.mac_address)
+            except BleakNotFoundError as err:
+                raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
+            except Exception as err:
+                raise UpdateFailed(f"BLE connection failed: {err}") from err
+            try:
+                await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
+                _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
+            finally:
+                await client.disconnect()
+
+    async def write_mode(self, mode: str) -> None:
+        async with self._ble_lock:
+            device = _get_ble_device(self.hass, self.mac_address)
+            try:
+                client = await establish_connection(BleakClient, device, self.mac_address)
+            except BleakNotFoundError as err:
+                raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
+            except Exception as err:
+                raise UpdateFailed(f"BLE connection failed: {err}") from err
+            try:
+                await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
+                _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
+            finally:
+                await client.disconnect()
