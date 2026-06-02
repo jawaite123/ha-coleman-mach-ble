@@ -7,8 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
-from bleak import BleakClient
-from bleak_retry_connector import establish_connection, BleakNotFoundError
+from bleak_retry_connector import establish_connection, BleakNotFoundError, BleakClientWithServiceCache
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -28,6 +27,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+BLE_CONNECT_TIMEOUT = 30.0  # seconds — guards against hci0 hanging mid-handshake
 BLE_READ_TIMEOUT = 10.0  # seconds
 
 
@@ -85,34 +85,20 @@ def _get_ble_device(hass: HomeAssistant, mac_address: str):
     return device
 
 
-async def _read_device(hass: HomeAssistant, mac_address: str) -> ColemanMachData:
-    device = _get_ble_device(hass, mac_address)
-    _LOGGER.info("Connecting to %s (rssi=%s)", mac_address, getattr(device, 'rssi', 'unknown'))
+async def _read_chars(client: BleakClientWithServiceCache, mac_address: str) -> ColemanMachData:
     raw_data: dict[str, bytes] = {}
-
-    try:
-        client = await establish_connection(BleakClient, device, mac_address)
-    except BleakNotFoundError as err:
-        raise UpdateFailed(f"Device {mac_address} not found: {err}") from err
-    except Exception as err:
-        raise UpdateFailed(f"BLE connection failed: {err}") from err
-    _LOGGER.info("Connected to %s", mac_address)
-
-    try:
-        for char_uuid in READ_ORDER:
-            try:
-                value = await asyncio.wait_for(
-                    client.read_gatt_char(char_uuid),
-                    timeout=BLE_READ_TIMEOUT,
-                )
-                raw_data[char_uuid] = bytes(value)
-                _LOGGER.debug("Read %s: %s", char_uuid, bytes(value).hex())
-            except asyncio.TimeoutError:
-                _LOGGER.warning("Timeout reading characteristic %s", char_uuid)
-            except Exception as err:
-                _LOGGER.warning("Error reading characteristic %s: %s", char_uuid, err)
-    finally:
-        await client.disconnect()
+    for char_uuid in READ_ORDER:
+        try:
+            value = await asyncio.wait_for(
+                client.read_gatt_char(char_uuid),
+                timeout=BLE_READ_TIMEOUT,
+            )
+            raw_data[char_uuid] = bytes(value)
+            _LOGGER.debug("Read %s: %s", char_uuid, bytes(value).hex())
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timeout reading characteristic %s", char_uuid)
+        except Exception as err:
+            _LOGGER.warning("Error reading characteristic %s: %s", char_uuid, err)
 
     if not raw_data:
         raise UpdateFailed("No data received from device")
@@ -126,6 +112,7 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     def __init__(self, hass: HomeAssistant, mac_address: str, interval: int) -> None:
         self.mac_address = mac_address
         self._ble_lock = asyncio.Lock()
+        self._client: BleakClientWithServiceCache | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -133,36 +120,61 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
             update_interval=timedelta(seconds=interval),
         )
 
+    def _on_disconnect(self, client: BleakClientWithServiceCache) -> None:
+        _LOGGER.debug("Disconnected from %s", self.mac_address)
+        self._client = None
+
+    async def _ensure_connected(self) -> BleakClientWithServiceCache:
+        if self._client and self._client.is_connected:
+            return self._client
+        device = _get_ble_device(self.hass, self.mac_address)
+        _LOGGER.debug("Connecting to %s (rssi=%s)", self.mac_address, getattr(device, "rssi", "unknown"))
+        try:
+            self._client = await asyncio.wait_for(
+                establish_connection(
+                    BleakClientWithServiceCache,
+                    device,
+                    self.mac_address,
+                    disconnected_callback=self._on_disconnect,
+                ),
+                timeout=BLE_CONNECT_TIMEOUT,
+            )
+        except asyncio.TimeoutError as err:
+            raise UpdateFailed(f"BLE connection to {self.mac_address} timed out after {BLE_CONNECT_TIMEOUT}s") from err
+        except BleakNotFoundError as err:
+            raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
+        except Exception as err:
+            raise UpdateFailed(f"BLE connection failed: {err}") from err
+        _LOGGER.info("Connected to %s", self.mac_address)
+        return self._client
+
     async def _async_update_data(self) -> ColemanMachData:
         async with self._ble_lock:
-            return await _read_device(self.hass, self.mac_address)
+            client = await self._ensure_connected()
+            return await _read_chars(client, self.mac_address)
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
-            device = _get_ble_device(self.hass, self.mac_address)
-            try:
-                client = await establish_connection(BleakClient, device, self.mac_address)
-            except BleakNotFoundError as err:
-                raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
-            except Exception as err:
-                raise UpdateFailed(f"BLE connection failed: {err}") from err
+            client = await self._ensure_connected()
             try:
                 await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
                 _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
-            finally:
-                await client.disconnect()
+            except Exception as err:
+                self._client = None
+                raise UpdateFailed(f"Failed to write set_point: {err}") from err
 
     async def write_mode(self, mode: str) -> None:
         async with self._ble_lock:
-            device = _get_ble_device(self.hass, self.mac_address)
-            try:
-                client = await establish_connection(BleakClient, device, self.mac_address)
-            except BleakNotFoundError as err:
-                raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
-            except Exception as err:
-                raise UpdateFailed(f"BLE connection failed: {err}") from err
+            client = await self._ensure_connected()
             try:
                 await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
                 _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
-            finally:
-                await client.disconnect()
+            except Exception as err:
+                self._client = None
+                raise UpdateFailed(f"Failed to write mode: {err}") from err
+
+    async def async_shutdown(self) -> None:
+        async with self._ble_lock:
+            if self._client and self._client.is_connected:
+                await self._client.disconnect()
+            self._client = None
