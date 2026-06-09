@@ -27,7 +27,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-BLE_CONNECT_TIMEOUT = 30.0  # seconds — guards against hci0 hanging mid-handshake
 BLE_READ_TIMEOUT = 10.0  # seconds
 
 
@@ -127,20 +126,21 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     async def _ensure_connected(self) -> BleakClientWithServiceCache:
         if self._client and self._client.is_connected:
             return self._client
+        if self._client:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
         device = _get_ble_device(self.hass, self.mac_address)
         _LOGGER.debug("Connecting to %s (rssi=%s)", self.mac_address, getattr(device, "rssi", "unknown"))
         try:
-            self._client = await asyncio.wait_for(
-                establish_connection(
-                    BleakClientWithServiceCache,
-                    device,
-                    self.mac_address,
-                    disconnected_callback=self._on_disconnect,
-                ),
-                timeout=BLE_CONNECT_TIMEOUT,
+            self._client = await establish_connection(
+                BleakClientWithServiceCache,
+                device,
+                self.mac_address,
+                disconnected_callback=self._on_disconnect,
             )
-        except asyncio.TimeoutError as err:
-            raise UpdateFailed(f"BLE connection to {self.mac_address} timed out after {BLE_CONNECT_TIMEOUT}s") from err
         except BleakNotFoundError as err:
             raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
         except Exception as err:
@@ -151,7 +151,11 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     async def _async_update_data(self) -> ColemanMachData:
         async with self._ble_lock:
             client = await self._ensure_connected()
-            return await _read_chars(client, self.mac_address)
+            try:
+                return await _read_chars(client, self.mac_address)
+            except Exception:
+                self._client = None
+                raise
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
