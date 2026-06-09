@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -136,6 +137,7 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
         )
 
     async def _async_update_data(self) -> ColemanMachData:
+        await asyncio.sleep(random.uniform(0, 10))
         async with self._ble_lock:
             client = await _connect(self.hass, self.mac_address)
             try:
