@@ -84,6 +84,23 @@ def _get_ble_device(hass: HomeAssistant, mac_address: str):
     return device
 
 
+async def _connect(hass: HomeAssistant, mac_address: str) -> BleakClientWithServiceCache:
+    device = _get_ble_device(hass, mac_address)
+    _LOGGER.debug("Connecting to %s (rssi=%s)", mac_address, getattr(device, "rssi", "unknown"))
+    try:
+        client = await establish_connection(
+            BleakClientWithServiceCache,
+            device,
+            mac_address,
+        )
+    except BleakNotFoundError as err:
+        raise UpdateFailed(f"Device {mac_address} not found: {err}") from err
+    except Exception as err:
+        raise UpdateFailed(f"BLE connection failed: {err}") from err
+    _LOGGER.info("Connected to %s", mac_address)
+    return client
+
+
 async def _read_chars(client: BleakClientWithServiceCache, mac_address: str) -> ColemanMachData:
     raw_data: dict[str, bytes] = {}
     for char_uuid in READ_ORDER:
@@ -111,7 +128,6 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     def __init__(self, hass: HomeAssistant, mac_address: str, interval: int) -> None:
         self.mac_address = mac_address
         self._ble_lock = asyncio.Lock()
-        self._client: BleakClientWithServiceCache | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -119,66 +135,28 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
             update_interval=timedelta(seconds=interval),
         )
 
-    def _on_disconnect(self, client: BleakClientWithServiceCache) -> None:
-        _LOGGER.debug("Disconnected from %s", self.mac_address)
-        self._client = None
-
-    async def _ensure_connected(self) -> BleakClientWithServiceCache:
-        if self._client and self._client.is_connected:
-            return self._client
-        if self._client:
-            try:
-                await self._client.disconnect()
-            except Exception:
-                pass
-            self._client = None
-        device = _get_ble_device(self.hass, self.mac_address)
-        _LOGGER.debug("Connecting to %s (rssi=%s)", self.mac_address, getattr(device, "rssi", "unknown"))
-        try:
-            self._client = await establish_connection(
-                BleakClientWithServiceCache,
-                device,
-                self.mac_address,
-                disconnected_callback=self._on_disconnect,
-            )
-        except BleakNotFoundError as err:
-            raise UpdateFailed(f"Device {self.mac_address} not found: {err}") from err
-        except Exception as err:
-            raise UpdateFailed(f"BLE connection failed: {err}") from err
-        _LOGGER.info("Connected to %s", self.mac_address)
-        return self._client
-
     async def _async_update_data(self) -> ColemanMachData:
         async with self._ble_lock:
-            client = await self._ensure_connected()
+            client = await _connect(self.hass, self.mac_address)
             try:
                 return await _read_chars(client, self.mac_address)
-            except Exception:
-                self._client = None
-                raise
+            finally:
+                await client.disconnect()
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
-            client = await self._ensure_connected()
+            client = await _connect(self.hass, self.mac_address)
             try:
                 await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
                 _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
-            except Exception as err:
-                self._client = None
-                raise UpdateFailed(f"Failed to write set_point: {err}") from err
+            finally:
+                await client.disconnect()
 
     async def write_mode(self, mode: str) -> None:
         async with self._ble_lock:
-            client = await self._ensure_connected()
+            client = await _connect(self.hass, self.mac_address)
             try:
                 await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
                 _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
-            except Exception as err:
-                self._client = None
-                raise UpdateFailed(f"Failed to write mode: {err}") from err
-
-    async def async_shutdown(self) -> None:
-        async with self._ble_lock:
-            if self._client and self._client.is_connected:
-                await self._client.disconnect()
-            self._client = None
+            finally:
+                await client.disconnect()
