@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -29,6 +30,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 BLE_READ_TIMEOUT = 10.0  # seconds
+UNAVAILABLE_GRACE_PERIOD = 300.0  # seconds before reporting unavailable after connection loss
 
 
 @dataclass
@@ -129,6 +131,7 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
     def __init__(self, hass: HomeAssistant, mac_address: str, interval: int) -> None:
         self.mac_address = mac_address
         self._ble_lock = asyncio.Lock()
+        self._last_success_time: float | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -138,12 +141,27 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
 
     async def _async_update_data(self) -> ColemanMachData:
         await asyncio.sleep(random.uniform(0, 10))
-        async with self._ble_lock:
-            client = await _connect(self.hass, self.mac_address)
-            try:
-                return await _read_chars(client, self.mac_address)
-            finally:
-                await client.disconnect()
+        try:
+            async with self._ble_lock:
+                client = await _connect(self.hass, self.mac_address)
+                try:
+                    data = await _read_chars(client, self.mac_address)
+                finally:
+                    await client.disconnect()
+        except UpdateFailed:
+            if self.data is not None and self._last_success_time is not None:
+                elapsed = time.monotonic() - self._last_success_time
+                if elapsed < UNAVAILABLE_GRACE_PERIOD:
+                    _LOGGER.debug(
+                        "Update failed for %s, keeping last known data (%.0fs since last success)",
+                        self.mac_address,
+                        elapsed,
+                    )
+                    return self.data
+            raise
+
+        self._last_success_time = time.monotonic()
+        return data
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
