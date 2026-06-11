@@ -13,6 +13,7 @@ from bleak_retry_connector import establish_connection, BleakNotFoundError, Blea
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -165,18 +166,24 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
-            client = await _connect(self.hass, self.mac_address)
             try:
-                await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
-                _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
-            finally:
-                await client.disconnect()
+                client = await _connect(self.hass, self.mac_address)
+                try:
+                    await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
+                    _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
+                finally:
+                    await client.disconnect()
+            except UpdateFailed as err:
+                raise HomeAssistantError(f"Could not set temperature: {err}") from err
 
     async def write_mode(self, mode: str) -> None:
         async with self._ble_lock:
-            client = await _connect(self.hass, self.mac_address)
             try:
-                await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
-                _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
-            finally:
-                await client.disconnect()
+                client = await _connect(self.hass, self.mac_address)
+                try:
+                    await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
+                    _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
+                finally:
+                    await client.disconnect()
+            except UpdateFailed as err:
+                raise HomeAssistantError(f"Could not set mode: {err}") from err
