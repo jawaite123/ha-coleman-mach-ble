@@ -9,7 +9,12 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
-from bleak_retry_connector import establish_connection, BleakNotFoundError, BleakClientWithServiceCache
+from bleak_retry_connector import (
+    close_stale_connections_by_address,
+    establish_connection,
+    BleakNotFoundError,
+    BleakClientWithServiceCache,
+)
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -90,6 +95,7 @@ def _get_ble_device(hass: HomeAssistant, mac_address: str):
 
 async def _connect(hass: HomeAssistant, mac_address: str) -> BleakClientWithServiceCache:
     device = _get_ble_device(hass, mac_address)
+    await close_stale_connections_by_address(mac_address)
     _LOGGER.debug("Connecting to %s (rssi=%s)", mac_address, getattr(device, "rssi", "unknown"))
     try:
         client = await establish_connection(
