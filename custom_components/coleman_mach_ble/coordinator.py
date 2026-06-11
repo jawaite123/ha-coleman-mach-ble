@@ -94,8 +94,13 @@ def _get_ble_device(hass: HomeAssistant, mac_address: str):
 
 
 async def _connect(hass: HomeAssistant, mac_address: str) -> BleakClientWithServiceCache:
+    # A lingering connection stops the device from advertising, which makes the
+    # scanner lookup fail — clean up before looking the device up.
+    try:
+        await close_stale_connections_by_address(mac_address)
+    except Exception as err:
+        _LOGGER.debug("Stale connection cleanup for %s failed: %s", mac_address, err)
     device = _get_ble_device(hass, mac_address)
-    await close_stale_connections_by_address(mac_address)
     _LOGGER.debug("Connecting to %s (rssi=%s)", mac_address, getattr(device, "rssi", "unknown"))
     try:
         client = await establish_connection(
@@ -111,7 +116,14 @@ async def _connect(hass: HomeAssistant, mac_address: str) -> BleakClientWithServ
     return client
 
 
-async def _read_chars(client: BleakClientWithServiceCache, mac_address: str) -> ColemanMachData:
+async def _safe_disconnect(client: BleakClientWithServiceCache, mac_address: str) -> None:
+    try:
+        await client.disconnect()
+    except Exception as err:
+        _LOGGER.debug("Error disconnecting from %s: %s", mac_address, err)
+
+
+async def _read_chars(client: BleakClientWithServiceCache, mac_address: str) -> dict[str, bytes]:
     raw_data: dict[str, bytes] = {}
     for char_uuid in READ_ORDER:
         try:
@@ -129,7 +141,7 @@ async def _read_chars(client: BleakClientWithServiceCache, mac_address: str) -> 
     if not raw_data:
         raise UpdateFailed("No data received from device")
 
-    return _parse_data(raw_data)
+    return raw_data
 
 
 class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
@@ -139,6 +151,7 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
         self.mac_address = mac_address
         self._ble_lock = asyncio.Lock()
         self._last_success_time: float | None = None
+        self._raw_cache: dict[str, bytes] = {}
         super().__init__(
             hass,
             _LOGGER,
@@ -152,10 +165,10 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
             async with self._ble_lock:
                 client = await _connect(self.hass, self.mac_address)
                 try:
-                    data = await _read_chars(client, self.mac_address)
+                    raw_data = await _read_chars(client, self.mac_address)
                 finally:
-                    await client.disconnect()
-        except UpdateFailed:
+                    await _safe_disconnect(client, self.mac_address)
+        except Exception as err:
             if self.data is not None and self._last_success_time is not None:
                 elapsed = time.monotonic() - self._last_success_time
                 if elapsed < UNAVAILABLE_GRACE_PERIOD:
@@ -165,10 +178,14 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
                         elapsed,
                     )
                     return self.data
-            raise
+            if isinstance(err, UpdateFailed):
+                raise
+            raise UpdateFailed(f"Update failed: {err}") from err
 
+        # Keep last known values for characteristics that failed this poll
+        self._raw_cache.update(raw_data)
         self._last_success_time = time.monotonic()
-        return data
+        return _parse_data(self._raw_cache)
 
     async def write_set_point(self, value: int) -> None:
         async with self._ble_lock:
@@ -178,8 +195,8 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
                     await client.write_gatt_char(CHAR_SET_POINT, bytes([value]))
                     _LOGGER.debug("Wrote set_point=%d to %s", value, self.mac_address)
                 finally:
-                    await client.disconnect()
-            except UpdateFailed as err:
+                    await _safe_disconnect(client, self.mac_address)
+            except Exception as err:
                 raise HomeAssistantError(f"Could not set temperature: {err}") from err
 
     async def write_mode(self, mode: str) -> None:
@@ -190,6 +207,6 @@ class ColemanMachCoordinator(DataUpdateCoordinator[ColemanMachData]):
                     await client.write_gatt_char(CHAR_MODE_OPERATION, mode.encode("ascii"))
                     _LOGGER.debug("Wrote mode=%r to %s", mode, self.mac_address)
                 finally:
-                    await client.disconnect()
-            except UpdateFailed as err:
+                    await _safe_disconnect(client, self.mac_address)
+            except Exception as err:
                 raise HomeAssistantError(f"Could not set mode: {err}") from err
